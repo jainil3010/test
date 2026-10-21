@@ -29,9 +29,64 @@ Files: `claude-bridge.sh` (runs on B), `skill/claude-bridge/SKILL.md` (tells the
 - `--resume` continues the conversation but does not type into a TUI open on B; two writers on one id can diverge.
 - Headless runs cannot answer permission prompts; unlisted tools are denied. Avoid `bypassPermissions`.
 
-## Setup
-B: install `claude`, log in, copy the script, `openclaw node install --host <A> --port 18789 --display-name claude-b` (Tailscale/SSH tunnel if A's gateway is loopback-only). Set `BRIDGE_WORKDIR` to the project dir.
-A: approve the node, run the `config set` and `allowlist add` commands above.
+## Setup: pair B as a node
+All commands below come from the OpenClaw docs in the npm package (`gateway/pairing.md`, `cli/connect.md`, `nodes/node-host.md`, `nodes/pairing-and-status.md`). I have not run them against a real gateway.
+
+**Before you start**
+- B has `claude` installed and logged in, and `node` 20+/`npx` (assumed: needed for `npx openclaw`; check the OpenClaw install docs for the exact Node version).
+- B can reach A's gateway (default port 18789). If A's gateway binds to loopback only, either set `gateway.publicOrigin` on A or open an SSH tunnel (see "Loopback gateway" below).
+- Exec approvals on a node default to `full` with `ask: "off"`. Tighten them first if that's too broad: see `tools/exec-approvals.md`. This README's `tools.exec.mode allowlist` setting on A is a separate gate.
+
+**Option 1: join code (recommended, one paste)**
+1. On A, as an admin: `openclaw devices join-code`. It prints a URL like `https://<gateway>/j/<shortcode>`. The code is single-use and expires in about 10 minutes.
+2. On B, run it as a command-only service node. Do **not** add `--session-host`; that lets B host full OpenClaw worker sessions, which you don't need:
+   ```bash
+   npx -y openclaw connect https://<gateway>/j/<shortcode> --service --display-name claude-b
+   ```
+   Leave off `--service` to run in the foreground first and watch it connect.
+3. Docs say admin-minted join codes approve the device and its first command surface (including `system.run`) automatically. Confirm on A:
+   ```bash
+   openclaw nodes status
+   openclaw nodes describe --node claude-b
+   ```
+
+**Option 2: manual pairing**
+1. On B: `openclaw node install --host <A-host> --port 18789 --display-name claude-b` then `openclaw node start` (or `openclaw node run --host <A-host> --port 18789 --display-name claude-b` in the foreground). Auth uses `OPENCLAW_GATEWAY_TOKEN` or `OPENCLAW_GATEWAY_PASSWORD` in B's environment.
+2. On A, approve the device, then the command surface. These are two separate request IDs:
+   ```bash
+   openclaw devices list
+   openclaw devices approve <deviceRequestId>
+   openclaw nodes pending
+   openclaw nodes approve <nodeRequestId>
+   openclaw nodes status
+   ```
+   Approving `system.run` needs `operator.pairing` + `operator.admin`. B retries with backoff (max 30s) while approval is pending; device requests expire 5 minutes after B's last retry.
+
+**Loopback gateway (A binds to 127.0.0.1)**
+```bash
+# on B, keep running
+ssh -N -L 18790:127.0.0.1:18789 user@<A-host>
+# on B, another terminal
+export OPENCLAW_GATEWAY_TOKEN="<gateway-token>"
+openclaw node run --host 127.0.0.1 --port 18790 --display-name claude-b
+```
+
+**Reconnect later:** join codes are single-use. After the node stops, restart with `openclaw node restart` (service) or `openclaw node run` (foreground). Mint a new join code only to enroll again.
+
+**Then route exec to B and allow the script (on A)**
+```bash
+openclaw config set tools.exec.host node
+openclaw config set tools.exec.node "claude-b"
+openclaw config set tools.exec.mode allowlist
+openclaw approvals allowlist add --node claude-b "/abs/path/on/B/claude-bridge.sh"
+```
+Install the skill on B so A's agent learns the command: copy `skill/claude-bridge/` to `~/.openclaw/skills/claude-bridge/` on B, then `openclaw node restart` (node-hosted skills are not watched). Docs: the node must have `system.run` approved and the agent's exec policy must allow `host=node`, otherwise the skill is hidden from the agent.
+
+**Smoke test (on A)**
+```bash
+openclaw nodes status                         # claude-b connected + paired
+```
+then, from WhatsApp/Discord, ask the agent to use the claude-bridge skill with a harmless prompt. Send me the exact error if anything fails.
 
 ## Drive your existing session
 Write that session's id into `~/.claude-bridge/<chat-key>.sid` (find ids under `~/.claude/projects/`). Cross-directory resume worked in my test, but set `BRIDGE_WORKDIR` to the original project dir to be safe. Avoid typing in the TUI at the same time.
